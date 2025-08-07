@@ -20,8 +20,8 @@
 1. Ensure you have [Love2D](https://love2d.org/) installed on your system.
 2. Clone this repository:
    ```bash
-   git clone https://github.com/devnnei/tiad.git```
-
+   git clone https://github.com/devnnei/tiad.git
+    ```
 
 ## Usage
 

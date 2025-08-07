@@ -25,21 +25,21 @@
 
 ## Usage
 
-    Use the Space bar to switch lanes during gameplay.
+- Use the Space bar to switch lanes during gameplay.
 
-    Enter the editor mode by pressing E to design your own rhythm charts.
+- Enter the editor mode by pressing E to design your own rhythm charts.
 
-    Place obstacles using L and D keys while in editor mode.
+- Place obstacles using L and D keys while in editor mode.
 
-    To change the BPM, open the source code and modify the BPM value manually.
+- To change the BPM, open the source code and modify the BPM value manually.
 
 ## Credits
 
-    Developers: [devnnei (the whole ass game)](devnnei.github.io), [amazuppai0 (register login system)](https://github.com/amazuppai0)
+- Developers: [devnnei (the whole ass game)](devnnei.github.io), [amazuppai0 (register login system)](https://github.com/amazuppai0)
 
     (amazuppai is not a contributor because he is not active on github so theres no need to add him)
 
-    Built with [Love2D](https://love2d.org) and Lua
+- Built with [Love2D](https://love2d.org) and Lua
 
 ## License
 

@@ -21,7 +21,7 @@
 2. Clone this repository:
    ```bash
    git clone https://github.com/devnnei/tiad.git
-    ```
+   ```
 
 ## Usage
 

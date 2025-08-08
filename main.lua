@@ -26,14 +26,17 @@ local player = {
 }
 
 -- Game states
-local gameState = "mainmenu" -- "mainmenu", "login", "register", "game"
+local gameState = "mainmenu" -- "mainmenu", "login", "register", "game", "gamemenu", "highscores"
 local gameMode = "play" -- "play", "editor", "chartplay"
 local obstacles = {}
 local chartData = {}
 
--- Assets
+-- Assets and UI effects
 local logoImage = nil
 local bgColor = {1, 1, 1} -- White background
+local uiPulse = 0
+local menuPulse = 0
+local scorePulse = 0
 
 -- User system
 local currentUser = nil
@@ -44,7 +47,7 @@ local userScores = {} -- Will store high scores per user
 local spawnTimer = 0
 local minSpawnInterval = 1.0
 local maxSpawnInterval = 1.5
-local nextSpawnTime = love.math.random(minSpawnInterval * 100, maxSpawnInterval * 100) / 100
+local nextSpawnTime = love.math.random(minSpawnInterval * 100, maxSpawnInterval * 10) / 1980
 local obstacleSpeed = 2500
 local editorTime = 0
 local chartIndex = 1
@@ -80,27 +83,72 @@ local isTypingPassword = false
 local gameMenuOptions = {"Play Game", "Level Editor", "High Scores", "Load Level (.tiad)", "Logout"}
 local gameMenuSelected = 1
 
--- Helper function: save user data to file
+-- Simple encryption function (XOR cipher using bit operations)
+local function encrypt(text, key)
+    local result = ""
+    local keyLen = #key
+    for i = 1, #text do
+        local char = string.byte(text, i)
+        local keyChar = string.byte(key, ((i - 1) % keyLen) + 1)
+        -- Manual XOR implementation for compatibility
+        local xorResult = 0
+        local temp1, temp2 = char, keyChar
+        local bit = 1
+        while temp1 > 0 or temp2 > 0 do
+            local bit1 = temp1 % 2
+            local bit2 = temp2 % 2
+            if bit1 ~= bit2 then
+                xorResult = xorResult + bit
+            end
+            temp1 = math.floor(temp1 / 2)
+            temp2 = math.floor(temp2 / 2)
+            bit = bit * 2
+        end
+        result = result .. string.char(xorResult)
+    end
+    return result
+end
+
+local function decrypt(encrypted, key)
+    return encrypt(encrypted, key) -- XOR is symmetric
+end
+
+-- Helper function: get app data directory
+local function getAppDataDir()
+    return love.filesystem.getAppdataDirectory() .. "/RhythmDodgeGame"
+end
+
+local function getTiadLevelsDir()
+    return love.filesystem.getAppdataDirectory() .. "/tiadlevels"
+end
+
+-- Helper function: save user data to file with encryption
 local function saveUserData()
     local data = "USERS\n"
     for username, userdata in pairs(users) do
-        data = data .. username .. ":" .. userdata.password .. "\n"
+        local encryptedPassword = encrypt(userdata.password, "tiad_key_2024")
+        data = data .. username .. ":" .. love.data.encode("string", "base64", encryptedPassword) .. "\n"
     end
     data = data .. "SCORES\n"
     for username, scores in pairs(userScores) do
         data = data .. username .. ":" .. table.concat(scores, ",") .. "\n"
     end
-    love.filesystem.write("userdata.txt", data)
+    
+    -- Create directory if it doesn't exist
+    local success = love.filesystem.createDirectory("RhythmDodgeGame")
+    if success then
+        love.filesystem.write("RhythmDodgeGame/userdata.txt", data)
+    end
 end
 
--- Helper function: load user data from file
+-- Helper function: load user data from file with decryption
 local function loadUserData()
-    if not love.filesystem.getInfo("userdata.txt") then
+    if not love.filesystem.getInfo("RhythmDodgeGame/userdata.txt") then
         return
     end
     
     local mode = "users"
-    for line in love.filesystem.lines("userdata.txt") do
+    for line in love.filesystem.lines("RhythmDodgeGame/userdata.txt") do
         if line == "USERS" then
             mode = "users"
         elseif line == "SCORES" then
@@ -109,7 +157,8 @@ local function loadUserData()
             local username, data = line:match("([^:]+):(.*)")
             if username and data then
                 if mode == "users" then
-                    users[username] = {password = data}
+                    local decryptedPassword = decrypt(love.data.decode("string", "base64", data), "tiad_key_2024")
+                    users[username] = {password = decryptedPassword}
                 elseif mode == "scores" then
                     userScores[username] = {}
                     for score in data:gmatch("([^,]+)") do
@@ -245,35 +294,53 @@ local function checkCollision(a, b)
            a.y + a.height / 2 > b.y - b.height / 2
 end
 
--- Save chartData to file
--- Save chartData to .tiad file
+-- Save chartData to .tiad file in tiadlevels directory
 local function saveChart(filename)
     if not filename:match("%.tiad$") then
         filename = filename .. ".tiad"  -- Force .tiad extension
     end
-    local data = ""
+    
+    -- Sort chart data by time
+    table.sort(chartData, function(a, b) return a.time < b.time end)
+    
+    local data = "# T.I.A.D Level File\n# Format: time;lane\n"
     for _, note in ipairs(chartData) do
-        data = data .. string.format("%.2f,%d\n", note.time, note.lane)
+        data = data .. string.format("%.3f;%d\n", note.time, note.lane)
     end
-    love.filesystem.write(filename, data)
-    print("Chart saved to " .. filename)
+    
+    -- Create tiadlevels directory in appdata
+    local success = love.filesystem.createDirectory("tiadlevels")
+    if success then
+        love.filesystem.write("tiadlevels/" .. filename, data)
+        print("Chart saved to tiadlevels/" .. filename)
+        return true
+    else
+        print("Failed to create tiadlevels directory")
+        return false
+    end
 end
 
--- Load chartData from file
-local function loadChart(filename)
-    -- Load chart from a .tiad file
+-- Load chartData from .tiad file
 local function loadTiadChart(filename)
     chartData = {}
-    if not love.filesystem.getInfo(filename) then
-        print("File not found: " .. filename)
-        return false, "File not found: " .. filename
+    
+    -- Try to load from tiadlevels directory first
+    local filepath = "tiadlevels/" .. filename
+    if not love.filesystem.getInfo(filepath) then
+        -- Fallback to original path
+        filepath = filename
+        if not love.filesystem.getInfo(filepath) then
+            print("File not found: " .. filename)
+            return false, "File not found: " .. filename
+        end
     end
 
-    for line in love.filesystem.lines(filename) do
-        line = line:trim()
+    for line in love.filesystem.lines(filepath) do
+        -- Simple trim function
+        line = line:gsub("^%s+", ""):gsub("%s+$", "")
         -- Skip empty lines and comments
         if line ~= "" and not line:match("^#") then
-            local t, lane = line:match("([^,]+),([^,]+)")
+            local t, lane = line:match("([^;]+);([^;]+)")
             if t and lane then
                 t = tonumber(t)
                 lane = tonumber(lane)
@@ -289,21 +356,8 @@ local function loadTiadChart(filename)
     end
 
     table.sort(chartData, function(a, b) return a.time < b.time end)
-    print("Loaded " .. #chartData .. " notes from " .. filename)
+    print("Loaded " .. #chartData .. " notes from " .. filepath)
     return true, "Chart loaded successfully!"
-end
-    chartData = {}
-    if not love.filesystem.getInfo(filename) then
-        print("No chart file found: " .. filename)
-        return
-    end
-    for line in love.filesystem.lines(filename) do
-        local t, lane = line:match("([^,]+),([^,]+)")
-        if t and lane then
-            table.insert(chartData, {time = tonumber(t), lane = tonumber(lane)})
-        end
-    end
-    print("Chart loaded with " .. #chartData .. " notes")
 end
 
 -- Start playing chart playback mode
@@ -355,23 +409,32 @@ local function updateObstacles(dt)
             obs.x = obs.x + direction * obstacleSpeed * dt
         end
 
-        if gameMode == "play" and checkCollision(player, obs) then
-            gameOver()
-            return
+        if gameMode == "play" or gameMode == "chartplay" then
+            if checkCollision(player, obs) then
+                gameOver()
+                return
+            end
         end
 
+        local shouldRemove = false
         if scrollDirection == SCROLL_VERTICAL then
             if (verticalMode == "downscroll" and obs.y > WINDOW_HEIGHT + 50) or
                (verticalMode == "upscroll" and obs.y < -50) then
-                if gameMode ~= "editor" then score = score + 1 end
-                table.remove(obstacles, i)
+                shouldRemove = true
             end
         else
             if (horizontalMode == "rightscroll" and obs.x > WINDOW_WIDTH + 50) or
                (horizontalMode == "leftscroll" and obs.x < -50) then
-                if gameMode ~= "editor" then score = score + 1 end
-                table.remove(obstacles, i)
+                shouldRemove = true
             end
+        end
+        
+        if shouldRemove then
+            if gameMode ~= "editor" then 
+                score = score + 1
+                scorePulse = 0.3 -- Create pulse effect for score
+            end
+            table.remove(obstacles, i)
         end
     end
 end
@@ -411,7 +474,7 @@ end
 
 function love.load()
     love.window.setMode(WINDOW_WIDTH, WINDOW_HEIGHT)
-    love.window.setTitle("Rhythm Dodge Game")
+    love.window.setTitle("T.I.A.D vBeta0.2 - Enhanced Edition")
     
     -- Load user data
     loadUserData()
@@ -431,6 +494,13 @@ function love.load()
 end
 
 function love.update(dt)
+    -- Update UI effects
+    uiPulse = uiPulse + dt * 3
+    menuPulse = menuPulse + dt * 2
+    if scorePulse > 0 then
+        scorePulse = scorePulse - dt * 2
+    end
+    
     if gameState ~= "game" then return end
     if paused then return end
 
@@ -452,11 +522,20 @@ function love.update(dt)
 
     elseif gameMode == "chartplay" then
         editorTime = editorTime + dt
+        -- Fixed chartplay obstacle spawning
         while chartIndex <= #chartData and chartData[chartIndex].time <= editorTime do
             spawnObstacle(chartData[chartIndex].lane)
             chartIndex = chartIndex + 1
         end
         updateObstacles(dt)
+        
+        -- Check if chart is complete
+        if chartIndex > #chartData and #obstacles == 0 then
+            print("Chart completed! Final Score: " .. score)
+            saveHighScore(score)
+            gameState = "gamemenu"
+            gameMode = "play"
+        end
     end
 
     if botplay and (gameMode == "play" or gameMode == "chartplay") then
@@ -466,13 +545,21 @@ end
 
 function love.draw()
     if gameState == "mainmenu" then
-        -- Draw main menu with white background
-        love.graphics.setColor(bgColor)
+        -- Energetic animated background
+        local pulse = math.sin(uiPulse) * 0.02 + 1
+        love.graphics.setColor(bgColor[1] * pulse, bgColor[2] * pulse, bgColor[3] * pulse)
         love.graphics.rectangle("fill", 0, 0, WINDOW_WIDTH, WINDOW_HEIGHT)
         
-        -- Draw logo (scaled down from 500x500 to fit)
+        -- Animated background lines
+        love.graphics.setColor(0.9 + math.sin(uiPulse * 2) * 0.1, 0.9, 0.9)
+        for i = 1, 5 do
+            local offset = math.sin(uiPulse + i) * 20
+            love.graphics.line(0, 100 + i * 80 + offset, WINDOW_WIDTH, 100 + i * 80 + offset)
+        end
+        
+        -- Draw logo with rhythmic scaling
         if logoImage then
-            local scale = 0.4 -- Adjust scale to fit
+            local scale = 0.4 + math.sin(uiPulse * 1.5) * 0.05
             local logoWidth = logoImage:getWidth() * scale
             local logoHeight = logoImage:getHeight() * scale
             love.graphics.setColor(1, 1, 1)
@@ -484,32 +571,37 @@ function love.draw()
         love.graphics.setFont(love.graphics.newFont(16))
         for i, option in ipairs(mainMenuOptions) do
             local y = 300 + i * 40
-            love.graphics.setColor(i == mainMenuSelected and {0.2, 0.2, 0.8} or {0.2, 0.2, 0.2})
-            love.graphics.printf(option, 0, y, WINDOW_WIDTH, "center")
+            local selectedPulse = i == mainMenuSelected and (1 + math.sin(menuPulse * 4) * 0.3) or 1
+            love.graphics.setColor((i == mainMenuSelected and {0.2, 0.2, 0.8} or {0.2, 0.2, 0.2}))
+            love.graphics.printf(option, selectedPulse * -5, y, WINDOW_WIDTH + selectedPulse * 10, "center")
         end
         
     elseif gameState == "login" or gameState == "register" then
-        -- Draw login/register screen with white background
-        love.graphics.setColor(bgColor)
+        -- Animated login screen
+        local pulse = math.sin(uiPulse) * 0.02 + 1
+        love.graphics.setColor(bgColor[1] * pulse, bgColor[2] * pulse, bgColor[3] * pulse)
         love.graphics.rectangle("fill", 0, 0, WINDOW_WIDTH, WINDOW_HEIGHT)
         
-        love.graphics.setColor(0.2, 0.2, 0.8)
+        love.graphics.setColor(0.2 + math.sin(uiPulse) * 0.1, 0.2, 0.8)
         love.graphics.setFont(love.graphics.newFont(20))
         local title = gameState == "login" and "LOGIN" or "REGISTER"
+        local titleScale = 1 + math.sin(menuPulse) * 0.1
         love.graphics.printf(title, 0, 150, WINDOW_WIDTH, "center")
         
         love.graphics.setFont(love.graphics.newFont(14))
         
-        -- Username field
-        love.graphics.setColor(isTypingUsername and {0.2, 0.2, 0.8} or {0.2, 0.2, 0.2})
+        -- Username field with glow effect
+        local userGlow = isTypingUsername and (0.5 + math.sin(uiPulse * 6) * 0.3) or 0
+        love.graphics.setColor(0.2 + userGlow, 0.2 + userGlow, 0.8)
         love.graphics.printf("Username:", 0, 220, WINDOW_WIDTH, "center")
         love.graphics.setColor(0.9, 0.9, 0.9)
         love.graphics.rectangle("fill", 100, 240, 200, 25)
         love.graphics.setColor(0, 0, 0)
         love.graphics.print(usernameInput .. (isTypingUsername and "_" or ""), 105, 245)
         
-        -- Password field
-        love.graphics.setColor(isTypingPassword and {0.2, 0.2, 0.8} or {0.2, 0.2, 0.2})
+        -- Password field with glow effect
+        local passGlow = isTypingPassword and (0.5 + math.sin(uiPulse * 6) * 0.3) or 0
+        love.graphics.setColor(0.2 + passGlow, 0.2 + passGlow, 0.8)
         love.graphics.printf("Password:", 0, 280, WINDOW_WIDTH, "center")
         love.graphics.setColor(0.9, 0.9, 0.9)
         love.graphics.rectangle("fill", 100, 300, 200, 25)
@@ -517,24 +609,33 @@ function love.draw()
         local hiddenPassword = string.rep("*", #passwordInput)
         love.graphics.print(hiddenPassword .. (isTypingPassword and "_" or ""), 105, 305)
         
-        -- Message
+        -- Animated message
         if loginMessage ~= "" then
-            love.graphics.setColor(loginMessage:find("successful") and {0, 0.7, 0} or {0.8, 0, 0})
+            local messageGlow = 1 + math.sin(uiPulse * 3) * 0.2
+            love.graphics.setColor((loginMessage:find("successful") and {0, 0.7 * messageGlow, 0} or {0.8 * messageGlow, 0, 0}))
             love.graphics.printf(loginMessage, 0, 350, WINDOW_WIDTH, "center")
         end
         
-        -- Instructions
-        love.graphics.setColor(0.4, 0.4, 0.4)
+        -- Pulsing instructions
+        love.graphics.setColor(0.4 + math.sin(uiPulse * 2) * 0.1, 0.4, 0.4)
         love.graphics.printf("Tab: Switch fields | Enter: Submit | Escape: Back", 0, 400, WINDOW_WIDTH, "center")
         
     elseif gameState == "gamemenu" then
-        -- Draw game menu (after login) with white background
-        love.graphics.setColor(bgColor)
+        -- Energetic game menu
+        local pulse = math.sin(uiPulse) * 0.02 + 1
+        love.graphics.setColor(bgColor[1] * pulse, bgColor[2] * pulse, bgColor[3] * pulse)
         love.graphics.rectangle("fill", 0, 0, WINDOW_WIDTH, WINDOW_HEIGHT)
         
-        -- Draw logo if available
+        -- Draw rhythmic background pattern
+        love.graphics.setColor(0.95 + math.sin(uiPulse * 3) * 0.05, 0.95, 0.95)
+        for i = 1, 8 do
+            local radius = 20 + math.sin(uiPulse * 2 + i) * 10
+            love.graphics.circle("line", WINDOW_WIDTH/2 + math.sin(i) * 100, 100 + i * 40, radius)
+        end
+        
+        -- Draw logo with pulse
         if logoImage then
-            local scale = 0.3
+            local scale = 0.3 + math.sin(uiPulse * 1.5) * 0.03
             local logoWidth = logoImage:getWidth() * scale
             local logoHeight = logoImage:getHeight() * scale
             love.graphics.setColor(1, 1, 1)
@@ -543,23 +644,25 @@ function love.draw()
                              0, scale, scale)
         end
         
-        love.graphics.setColor(0.2, 0.2, 0.8)
+        love.graphics.setColor(0.2, 0.2 + math.sin(uiPulse * 2) * 0.1, 0.8)
         love.graphics.setFont(love.graphics.newFont(20))
         love.graphics.printf("Welcome, " .. (currentUser or "Player"), 0, 185, WINDOW_WIDTH, "center")
         
         love.graphics.setFont(love.graphics.newFont(16))
         for i, option in ipairs(gameMenuOptions) do
             local y = 200 + i * 40
+            local selectedPulse = i == gameMenuSelected and (1.2 + math.sin(menuPulse * 5) * 0.2) or 1
             love.graphics.setColor(i == gameMenuSelected and {0.2, 0.2, 0.8} or {0.2, 0.2, 0.2})
-            love.graphics.printf(option, 0, y, WINDOW_WIDTH, "center")
+            love.graphics.printf(option, selectedPulse * -10, y, WINDOW_WIDTH + selectedPulse * 20, "center")
         end
         
     elseif gameState == "highscores" then
-        -- Draw high scores with white background
-        love.graphics.setColor(bgColor)
+        -- Animated high scores
+        local pulse = math.sin(uiPulse) * 0.02 + 1
+        love.graphics.setColor(bgColor[1] * pulse, bgColor[2] * pulse, bgColor[3] * pulse)
         love.graphics.rectangle("fill", 0, 0, WINDOW_WIDTH, WINDOW_HEIGHT)
         
-        love.graphics.setColor(0.2, 0.2, 0.8)
+        love.graphics.setColor(0.2, 0.2 + math.sin(uiPulse * 2) * 0.1, 0.8)
         love.graphics.setFont(love.graphics.newFont(20))
         love.graphics.printf("HIGH SCORES", 0, 50, WINDOW_WIDTH, "center")
         
@@ -570,24 +673,29 @@ function love.draw()
             love.graphics.printf("Your Best Scores:", 0, 100, WINDOW_WIDTH, "center")
             
             for i = 1, math.min(10, #scores) do
+                local rankGlow = 1 + math.sin(uiPulse * 2 + i) * 0.1
+                love.graphics.setColor(0.2 * rankGlow, 0.2, 0.2)
                 love.graphics.printf(i .. ". " .. scores[i], 0, 120 + i * 25, WINDOW_WIDTH, "center")
             end
             
             if #scores == 0 then
+                local noScoreGlow = 1 + math.sin(uiPulse * 3) * 0.2
+                love.graphics.setColor(0.4 * noScoreGlow, 0.4, 0.4)
                 love.graphics.printf("No scores yet!", 0, 150, WINDOW_WIDTH, "center")
             end
         end
         
-        love.graphics.setColor(0.4, 0.4, 0.4)
+        love.graphics.setColor(0.4 + math.sin(uiPulse * 2) * 0.1, 0.4, 0.4)
         love.graphics.printf("Press Escape to go back", 0, 500, WINDOW_WIDTH, "center")
         
     elseif gameState == "game" then
-        -- Draw game with white background
-        love.graphics.setColor(bgColor)
+        -- Energetic game background
+        local pulse = math.sin(uiPulse * 2) * 0.02 + 1
+        love.graphics.setColor(bgColor[1] * pulse, bgColor[2] * pulse, bgColor[3] * pulse)
         love.graphics.rectangle("fill", 0, 0, WINDOW_WIDTH, WINDOW_HEIGHT)
         
-        -- Draw lanes
-        love.graphics.setColor(0.9, 0.9, 0.9)
+        -- Draw lanes with rhythmic effects
+        love.graphics.setColor(0.9 + math.sin(uiPulse * 4) * 0.05, 0.9, 0.9)
         if scrollDirection == SCROLL_VERTICAL then
             for _, x in ipairs(LANES_VERTICAL) do
                 love.graphics.rectangle("fill", x - 25, 0, 50, WINDOW_HEIGHT)
@@ -598,40 +706,55 @@ function love.draw()
             end
         end
 
-        -- Draw player (centered on lane line)
-        love.graphics.setColor(0.1, 0.9, 0.1)
+        -- Draw player with pulse effect
+        local playerPulse = 1 + math.sin(uiPulse * 8) * 0.1
+        love.graphics.setColor(0.1 * playerPulse, 0.9 * playerPulse, 0.1 * playerPulse)
         love.graphics.rectangle("fill", player.x - player.width / 2, player.y - player.height / 2, player.width, player.height)
 
-        -- Draw obstacles (centered on lane lines)
+        -- Draw obstacles with energy
         for _, obs in ipairs(obstacles) do
-            love.graphics.setColor(gameMode == "editor" and {1, 0.2, 0.2, 0.4} or {0.9, 0.1, 0.1})
+            local obsPulse = gameMode == "editor" and 0.4 or (1 + math.sin(uiPulse * 6) * 0.1)
+            love.graphics.setColor(gameMode == "editor" and {1 * obsPulse, 0.2 * obsPulse, 0.2 * obsPulse, 0.4} or {0.9 * obsPulse, 0.1 * obsPulse, 0.1 * obsPulse})
             love.graphics.rectangle("fill", obs.x - obs.width / 2, obs.y - obs.height / 2, obs.width, obs.height)
         end
 
-        -- Draw UI text
+        -- Draw UI text with rhythmic effects
         love.graphics.setColor(0.2, 0.2, 0.2)
         love.graphics.print("Mode: " .. gameMode, 10, 10)
+        
+        -- Animated score with pulse effect
+        local scoreScale = 1 + (scorePulse > 0 and scorePulse * 0.5 or 0)
+        love.graphics.setColor(0.2, 0.2 + scorePulse * 0.5, 0.2)
         love.graphics.print("Score: " .. score, 10, 30)
+        
+        love.graphics.setColor(0.2, 0.2, 0.2)
         love.graphics.print("Player: " .. (currentUser or "Guest"), 10, 50)
         love.graphics.print("Scroll: " .. scrollDirection .. (scrollDirection == SCROLL_VERTICAL and (" (" .. verticalMode .. ")") or (" (" .. horizontalMode .. ")")), 10, 70)
 
         if gameMode == "editor" then
+            love.graphics.setColor(0.2, 0.2 + math.sin(uiPulse * 3) * 0.1, 0.2)
             love.graphics.print("Editor Time: " .. string.format("%.2f", editorTime), 10, 90)
             love.graphics.print("L/R: place notes  S: save  P: play chart  Space: switch lane", 10, 110)
+        elseif gameMode == "chartplay" then
+            love.graphics.setColor(0.2, 0.2, 0.8 + math.sin(uiPulse * 4) * 0.1)
+            love.graphics.print("CHART PLAYBACK - Time: " .. string.format("%.2f", editorTime), 10, 90)
+            love.graphics.print("Notes: " .. chartIndex - 1 .. "/" .. #chartData, 10, 110)
         end
 
         if botplay then
-            love.graphics.setColor(1, 0.5, 0)
+            local botGlow = 1 + math.sin(uiPulse * 5) * 0.3
+            love.graphics.setColor(1 * botGlow, 0.5 * botGlow, 0)
             love.graphics.print("BOTPLAY ENABLED", 10, 130)
         end
 
-        -- Debug info for obstacle counts
-        love.graphics.setColor(0.4, 0.4, 0.4)
+        -- Energetic debug info
+        love.graphics.setColor(0.4 + math.sin(uiPulse) * 0.1, 0.4, 0.4)
         updateLaneObstacleCounts()
         love.graphics.print("Lane 1: " .. laneObstacleCounts[1] .. " | Lane 2: " .. laneObstacleCounts[2], 10, 150)
 
         if paused then
-            love.graphics.setColor(0, 0, 0, 0.7)
+            -- Animated pause menu
+            love.graphics.setColor(0, 0, 0, 0.7 + math.sin(uiPulse * 2) * 0.1)
             love.graphics.rectangle("fill", 50, 150, 300, 200)
 
             love.graphics.setColor(1, 1, 1)
@@ -639,7 +762,8 @@ function love.draw()
 
             for i, option in ipairs(pauseMenuOptions) do
                 local y = 180 + i * 30
-                love.graphics.setColor(i == selectedOption and {0.2, 0.2, 0.8} or {1, 1, 1})
+                local selectedGlow = i == selectedOption and (1 + math.sin(menuPulse * 6) * 0.3) or 1
+                love.graphics.setColor(i == selectedOption and {0.2, 0.2, 0.8 * selectedGlow} or {1, 1, 1})
                 love.graphics.printf(option, 50, y, 300, "center")
             end
         end
@@ -714,53 +838,54 @@ function love.keypressed(key)
             gameMenuSelected = gameMenuSelected + 1
             if gameMenuSelected > #gameMenuOptions then gameMenuSelected = 1 end
         elseif key == "return" or key == "kpenter" then
-    if gameMenuSelected == 1 then -- Play Game
-        gameState = "game"
-        gameMode = "play"
-        obstacles = {}
-        score = 0
-        player.lane = 1
-        lastSpawnedLane = 2
-        if scrollDirection == SCROLL_VERTICAL then
-            player.x = LANES_VERTICAL[1]
-            player.y = verticalMode == "downscroll" and (WINDOW_HEIGHT - 100) or 100
-        else
-            player.x = horizontalMode == "rightscroll" and (WINDOW_WIDTH - 100) or 100
-            player.y = LANES_HORIZONTAL[1]
+            if gameMenuSelected == 1 then -- Play Game
+                gameState = "game"
+                gameMode = "play"
+                obstacles = {}
+                score = 0
+                player.lane = 1
+                lastSpawnedLane = 2
+                spawnTimer = 0
+                nextSpawnTime = love.math.random(minSpawnInterval * 100, maxSpawnInterval * 100) / 100
+                if scrollDirection == SCROLL_VERTICAL then
+                    player.x = LANES_VERTICAL[1]
+                    player.y = verticalMode == "downscroll" and (WINDOW_HEIGHT - 100) or 100
+                else
+                    player.x = horizontalMode == "rightscroll" and (WINDOW_WIDTH - 100) or 100
+                    player.y = LANES_HORIZONTAL[1]
+                end
+            elseif gameMenuSelected == 2 then -- Level Editor
+                gameState = "game"
+                gameMode = "editor"
+                editorTime = 0
+                chartData = {}
+                obstacles = {}
+                score = 0
+                player.lane = 1
+                lastSpawnedLane = 2
+                if scrollDirection == SCROLL_VERTICAL then
+                    player.x = LANES_VERTICAL[1]
+                    player.y = verticalMode == "downscroll" and (WINDOW_HEIGHT - 100) or 100
+                else
+                    player.x = horizontalMode == "rightscroll" and (WINDOW_WIDTH - 100) or 100
+                    player.y = LANES_HORIZONTAL[1]
+                end
+            elseif gameMenuSelected == 3 then -- High Scores
+                gameState = "highscores"
+            elseif gameMenuSelected == 4 then -- Load Level (.tiad)
+                local success, msg = loadTiadChart("custom.tiad")
+                if success then
+                    startChartPlay()
+                    gameState = "game"
+                else
+                    loginMessage = msg
+                    print(msg)
+                end
+            elseif gameMenuSelected == 5 then -- Logout
+                currentUser = nil
+                gameState = "mainmenu"
+            end
         end
-    elseif gameMenuSelected == 2 then -- Level Editor
-        gameState = "game"
-        gameMode = "editor"
-        editorTime = 0
-        chartData = {}
-        obstacles = {}
-        score = 0
-        player.lane = 1
-        lastSpawnedLane = 2
-        if scrollDirection == SCROLL_VERTICAL then
-            player.x = LANES_VERTICAL[1]
-            player.y = verticalMode == "downscroll" and (WINDOW_HEIGHT - 100) or 100
-        else
-            player.x = horizontalMode == "rightscroll" and (WINDOW_WIDTH - 100) or 100
-            player.y = LANES_HORIZONTAL[1]
-        end
-    elseif gameMenuSelected == 3 then -- High Scores
-        gameState = "highscores"
-    elseif gameMenuSelected == 4 then -- Load Level (.tiad)
-        local success, msg = loadTiadChart("levels/custom.tiad") -- You can customize path
-        if success then
-            startChartPlay()
-            gameState = "game"
-            gameMode = "chartplay"
-        else
-            loginMessage = msg -- reuse message display (you may want a dedicated UI)
-            print(msg)
-        end
-    elseif gameMenuSelected == 5 then -- Logout
-        currentUser = nil
-        gameState = "mainmenu"
-    end
-end
         
     elseif gameState == "highscores" then
         if key == "escape" then
@@ -842,10 +967,18 @@ end
                 table.insert(chartData, {time = editorTime, lane = 2})
                 spawnObstacle(2)
             elseif key == "s" then
-                saveChart("chart.txt")
+                local filename = "level_" .. os.date("%Y%m%d_%H%M%S") .. ".tiad"
+                if saveChart(filename) then
+                    print("Chart saved as: " .. filename)
+                else
+                    print("Failed to save chart")
+                end
             elseif key == "p" then
-                loadChart("chart.txt")
-                startChartPlay()
+                if #chartData > 0 then
+                    startChartPlay()
+                else
+                    print("No chart data to play!")
+                end
             elseif key == "space" then
                 toggleLane()
             elseif key == "q" then -- Quit to menu

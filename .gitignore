@@ -1,0 +1,16 @@
+# LÖVE temp files
+*.tmp
+*.temp
+
+# Avoid accidental config leaks
+config.ini
+save.dat
+userdata.txt
+
+# Logs
+log.txt
+*.log
+
+# OS junk
+.DS_Store
+Thumbs.db
